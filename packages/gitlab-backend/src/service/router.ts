@@ -31,6 +31,50 @@ export async function createRouter(
     const secure = config.getOptionalBoolean('gitlab.proxySecure');
     const basePath = getBasePath(config) || '';
 
+    const permissionIntegrationRouter = createPermissionIntegrationRouter({
+        getResources: async resourceRefs => {
+        return resourceRefs.map(id => ({ id }));
+        },
+        resourceType: GITLAB_PROJECT_RESOURCE_TYPE,
+        permissions: gitlabPermissions,
+        rules: Object.values(rules),
+    });
+
+     const gitlabCustomMiddleware: RequestHandler = async (
+        req: Request,
+        _: Response,
+        next: NextFunction,
+    ) => {
+        const projectIdMatch = req.path.match(/(?<=projects\/)\d+/);
+        const projectId = projectIdMatch ? projectIdMatch[0] : null;
+
+        const token = getBearerTokenFromAuthorizationHeader(
+        req.header('authorization'),
+        );
+
+        const decision = await permissions.authorize(
+        projectId
+            ? [
+                {
+                permission: GitlabViewProjectPermission,
+                resourceRef: projectId,
+                },
+            ]
+            : [
+                {
+                permission: GitlabViewGlobalResourcesPermission,
+                },
+            ],
+        { token },
+        );
+
+        if (decision[0].result !== AuthorizeResult.ALLOW) {
+        throw new NotAllowedError('Unauthorized');
+        }
+
+        next();
+    };
+
     const gitlabIntegrations: GitLabIntegrationConfig[] =
         readGitLabIntegrationConfigs(
             config.getConfigArray('integrations.gitlab')
@@ -42,6 +86,9 @@ export async function createRouter(
     router.use(bodyParser.json());
     router.use(bodyParser.urlencoded({ extended: true }));
     router.use(bodyParser.text());
+
+    router.use(permissionIntegrationRouter);
+    router.use(gitlabCustomMiddleware);
 
     // We are filtering the proxy request headers here rather than in
     // `onProxyReq` because when global-agent is enabled then `onProxyReq`
